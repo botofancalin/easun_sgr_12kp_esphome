@@ -1,0 +1,1088 @@
+substitutions:
+  inverter_id: "easun" # Customisable inverter name
+  inverter_updates: 10s
+  inverter_slow_updates: 60s
+
+esphome:
+  name: ${inverter_id}-sgr-12kp
+  friendly_name: SGR-12KP
+  comment: "Monitor EaSun SGR-12KP Solar Inverter"
+  
+# you can configure your esp32 or esp8266 board below
+esp32:
+  board: lolin_s3_mini
+  variant: ESP32S3
+  flash_size: 4MB
+  cpu_frequency: 240MHZ
+  framework:
+    type: esp-idf
+    advanced:
+      loop_task_stack_size: "16384"
+
+# esp32s3 specific PSRAM configuration
+psram:
+  mode: quad 
+  speed: 80MHZ
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+
+ota:
+  - platform: esphome
+    id: esphome_ota
+  - platform: web_server
+
+web_server:
+  version: 3
+  port: 80
+
+logger:
+  baud_rate: 0
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+uart:
+  id: uart_0
+  tx_pin: GPIO43
+  rx_pin: GPIO44
+  baud_rate: 9600
+
+modbus:
+  id: ${inverter_id}_modbus
+
+modbus_controller:
+  - id: ${inverter_id}
+    address: 0x01
+    modbus_id: ${inverter_id}_modbus
+    command_throttle: 200ms
+    setup_priority: -10
+    update_interval: ${inverter_updates}
+    max_cmd_retries: 2
+
+debug:
+  update_interval: ${inverter_updates}
+
+################################### Text Sensors #######################################
+text_sensor:
+  - platform: template
+    entity_category: "diagnostic"
+    name: Inverter Date
+    lambda: |-
+      int year = (id(${inverter_id}_year).state);
+      int month = (id(${inverter_id}_month).state);
+      int day = (id(${inverter_id}_day).state);
+      return { ( std::to_string(day) + "/" + std::to_string(month) + "/" + std::to_string(year)).c_str() };
+    icon: mdi:calendar
+    update_interval: ${inverter_slow_updates}
+
+  - platform: template
+    entity_category: "diagnostic"
+    name: Inverter Time
+    lambda: |-
+      int hour = (id(${inverter_id}_hour).state);
+      int minute = (id(${inverter_id}_minute).state);
+      int second = (id(${inverter_id}_second).state);
+      return { ( std::to_string(hour) + ":" + std::to_string(minute) + ":" + std::to_string(second)).c_str() };
+    icon: mdi:clock-outline
+    update_interval: ${inverter_updates}
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Startup Status" 
+    id: ${inverter_id}_startup_status
+    register_type: holding
+    address: 0x7594 
+    raw_encode: HEXBYTES
+    lambda: |-
+      char buf[4];
+      uint16_t value = modbus::helpers::word_from_hex_str(x, 0);
+      switch (value) {
+        case 0: 
+          x = "Initialization";
+          break;
+        case 1: 
+          x = "Standby";
+          break;
+        case 2: 
+          x = "Grid-connected";
+          break;
+        case 3: 
+          x = "Inverting";
+          break;
+        default: 
+          snprintf(buf, sizeof(buf), "%d%%", int(value));
+          x = buf;
+          break;
+      }
+      return x;
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Inverter State" 
+    id: ${inverter_id}_inverter_state 
+    register_type: holding
+    address: 0x7595 
+    raw_encode: HEXBYTES
+    lambda: |-
+      char buf[4];
+      uint16_t value = modbus::helpers::word_from_hex_str(x, 0);
+      switch (value) {
+        case 0: 
+          x = "Off";
+          break;
+        case 1: 
+          x = "Grid Bypass";
+          id(${inverter_id}_grid_connected_status).publish_state(true);
+          break;
+        case 2: 
+          x = "Inverter Active";
+          id(${inverter_id}_grid_connected_status).publish_state(false);
+          break;
+        default: 
+          snprintf(buf, sizeof(buf), "%d%%", int(value));
+          x = buf;
+          break;
+      }
+      return x;
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Charge state" 
+    id: ${inverter_id}_charge_state 
+    register_type: holding
+    address: 0x7596
+    raw_encode: HEXBYTES
+    lambda: |-
+      char buf[4];
+      uint16_t value = modbus::helpers::word_from_hex_str(x, 0);
+      switch (value) {
+        case 0: 
+          x = "Quick Charge";
+          break;
+        case 2: 
+          x = "Const V Charge";
+          break;
+        case 4: 
+          x = "Float Charge";
+          break;
+        case 6: 
+          x = "Li Battery Active";
+          break;
+        case 8: 
+          x = "Full";
+          break;
+        case 16:
+          x = "Battery self-test in progress";
+          break;
+        default: 
+          snprintf(buf, sizeof(buf), "%d%%", int(value));
+          x = buf;
+          break;
+      }
+      return x;
+
+  - platform: template
+    entity_category: diagnostic
+    name: Uptime
+    lambda: |-
+      int seconds = (id(uptime_internal).state);
+      int days = seconds / (24 * 3600);
+      seconds = seconds % (24 * 3600); 
+      int hours = seconds / 3600;
+      seconds = seconds % 3600;
+      int minutes = seconds /  60;
+      seconds = seconds % 60;
+      return { ( std::to_string(days) + "d " + std::to_string(hours) + "h " + std::to_string(minutes) + "m " + std::to_string(seconds) + "s").c_str() };
+    icon: mdi:clock-start
+    update_interval: ${inverter_updates}
+
+################################### Settings #######################################
+select:
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Output Prority"
+    id: ${inverter_id}_output_priority
+    address: 0xA028
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    icon: mdi:power
+    optionsmap:
+      "SOL": 0
+      "UTI": 1
+      "SBU": 2
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Charger Source Priority"
+    id: ${inverter_id}_charger_source
+    address: 0xA02E
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    icon: mdi:cog
+    optionsmap:
+      "Solar first": 0
+      "Utility first": 1
+      "Solar and Utility": 2
+      "Only Solar": 3
+
+switch:
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    id: ${inverter_id}_pe_n_bonding
+    name: "PE-N Connection"
+    register_type: holding
+    address: 0xA036
+    force_new_range: True
+    use_write_multiple: True
+    bitmask: 1
+
+button:
+  - platform: restart
+    name: "Device Restart"
+
+number:
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Charging Current Limit"
+    id: ${inverter_id}_charging_current_limit
+    address: 0xA02F
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    icon: mdi:current-dc
+    mode: "box"
+    min_value: 0
+    max_value: 80
+    step:  5
+    multiply: 10
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Solar charging Current Limit"
+    id: ${inverter_id}_solar_charging_current_limit
+    address: 0xA030
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    icon: mdi:solar-power-variant
+    mode: "box"
+    min_value: 0
+    max_value: 80
+    step:  5
+    multiply: 10
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Grid Charging Current Limit"
+    id: ${inverter_id}_grid_charging_current_limit
+    address: 0xA031
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    icon: mdi:current-ac
+    mode: "box"
+    min_value: 0
+    max_value: 40
+    step:  5
+    multiply: 10
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Battery Full Current"
+    id: ${inverter_id}_battery_full_current
+    address: 0xA035
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    icon: mdi:current-ac
+    mode: "box"
+    min_value: 2
+    max_value: 15
+    step:  1
+    multiply: 10
+    
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Boost Charge Voltage"
+    id: ${inverter_id}_boost_charge_voltage
+    address: 0xA08D
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    icon: "mdi:battery-charging-60"
+    mode: BOX
+    min_value: 53
+    max_value: 58.0
+    step: 0.1
+    multiply: 10
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Float Charge Voltage"
+    id: ${inverter_id}_float_charge_voltage
+    address: 0xA08E
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    icon: "mdi:battery-charging-40"
+    mode: BOX
+    min_value: 53
+    max_value: 58.0
+    step: 0.1
+    multiply: 10
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Restart Charge Voltage"
+    id: ${inverter_id}_restart_charge_voltage
+    address: 0xA091
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    icon: mdi:battery-charging
+    mode: BOX
+    min_value: 51.2
+    max_value: 54.4
+    step: 0.1
+    multiply: 10
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Switch To Grid Voltage"
+    id: ${inverter_id}_mains_switching_voltage
+    address: 0xA092
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    icon: mdi:transmission-tower
+    mode: "box"
+    min_value: 49
+    max_value: 54
+    step: 0.1
+    multiply: 10
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Switch To Battery Voltage"
+    id: ${inverter_id}_batttery_switching_voltage
+    address: 0xA093
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    icon: mdi:transmission-tower-off
+    mode: "box"
+    min_value: 52
+    max_value: 56
+    step: 0.1
+    multiply: 10
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Battery Capacity"
+    id: ${inverter_id}_battery_capacity
+    address: 0xA0B1
+    force_new_range: True
+    use_write_multiple: True
+    value_type: U_WORD
+    unit_of_measurement: "Ah"
+    icon: mdi:battery-outline
+    mode: BOX
+    min_value: 100
+    max_value: 2000
+    step: 50
+
+# #################### Inverter dynamic information ##############################  
+sensor:
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Battery Voltage" 
+    id: ${inverter_id}_battery_voltage 
+    register_type: holding
+    address: 0x7530
+    state_class: measurement
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    device_class: voltage
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Battery Current" 
+    id: ${inverter_id}_battery_current 
+    register_type: holding
+    address: 0x7531
+    value_type: S_WORD
+    state_class: measurement
+    unit_of_measurement: "A"
+    accuracy_decimals: 1
+    device_class: current
+    filters:
+        - multiply: 0.1 
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Battery SOC" 
+    id: ${inverter_id}_battery_soc 
+    register_type: holding
+    address: 0x7532 
+    state_class: measurement
+    unit_of_measurement: "%"
+    device_class: battery
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Charger Power (Main + PV)" 
+    id: ${inverter_id}_battery_charging_power 
+    register_type: holding
+    address: 0x7533
+    state_class: measurement
+    unit_of_measurement: "W"
+    device_class: power
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Grid Charging Current" 
+    id: ${inverter_id}_grid_charging_current 
+    register_type: holding
+    address: 0x7534
+    state_class: measurement
+    unit_of_measurement: "A"
+    accuracy_decimals: 1
+    device_class: current
+    filters:
+        - multiply: 0.1 
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Solar Charging Current" 
+    id: ${inverter_id}_solar_charging_current 
+    register_type: holding
+    address: 0x7535
+    state_class: measurement
+    unit_of_measurement: "A"
+    accuracy_decimals: 1
+    device_class: current
+    filters:
+        - multiply: 0.1 
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "PV Voltage" 
+    id: ${inverter_id}_pv_voltage 
+    register_type: holding
+    address: 0x753B
+    state_class: measurement
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    device_class: voltage
+    filters:
+        - multiply: 0.1 
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "PV Current" 
+    id: ${inverter_id}_pv_current 
+    register_type: holding
+    address: 0x753C
+    state_class: measurement
+    unit_of_measurement: "A"
+    accuracy_decimals: 1
+    device_class: current
+    filters:
+        - multiply: 0.1   
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "PV Power" 
+    id: ${inverter_id}_pv_power 
+    register_type: holding
+    address: 0x753D
+    state_class: measurement 
+    unit_of_measurement: "W"
+    device_class: power
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "PV 2 Voltage" 
+    id: ${inverter_id}_pv_2_voltage 
+    register_type: holding
+    address: 0x753E
+    state_class: measurement
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    device_class: voltage
+    filters:
+        - multiply: 0.1 
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "PV 2 Current" 
+    id: ${inverter_id}_pv_2_current 
+    register_type: holding
+    address: 0x753F
+    state_class: measurement
+    unit_of_measurement: "A"
+    accuracy_decimals: 1
+    device_class: current
+    filters:
+        - multiply: 0.1   
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "PV 2 Power" 
+    id: ${inverter_id}_pv_2_power 
+    register_type: holding
+    address: 0x7540
+    state_class: measurement 
+    unit_of_measurement: "W"
+    device_class: power
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Output Voltage" 
+    id: ${inverter_id}_output_voltage 
+    register_type: holding
+    address: 0x7548
+    state_class: measurement
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    device_class: voltage
+    filters:
+        - multiply: 0.1 
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Output Current"
+    id: ${inverter_id}_output_current 
+    register_type: holding
+    address: 0x7549 
+    state_class: measurement
+    unit_of_measurement: "A"
+    accuracy_decimals: 1
+    device_class: current
+    filters:
+        - multiply: 0.1 
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Output Frequency" 
+    id: ${inverter_id}_output_freq 
+    register_type: holding
+    address: 0x754A
+    state_class: measurement
+    unit_of_measurement: "Hz"
+    accuracy_decimals: 2
+    device_class: frequency
+    filters:
+        - multiply: 0.01  
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Inverter Current" 
+    id: ${inverter_id}_inverter_current 
+    register_type: holding
+    address: 0x754B
+    state_class: measurement
+    unit_of_measurement: "A"
+    accuracy_decimals: 1
+    device_class: current
+    filters:
+        - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Output Active Power" 
+    id: ${inverter_id}_output_active_power 
+    register_type: holding
+    address: 0x754C
+    state_class: measurement
+    unit_of_measurement: "W"
+    device_class: power  
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Output Aparent Load Power" 
+    id: ${inverter_id}_output_aparent_Power 
+    register_type: holding
+    address: 0x754D
+    state_class: measurement
+    unit_of_measurement: "VA"
+    device_class: apparent_power
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Load Rate" 
+    id: ${inverter_id}_load_rate 
+    register_type: holding
+    address: 0x7560 
+    state_class: measurement
+    unit_of_measurement: "%"
+    icon: mdi:percent
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Grid Voltage" 
+    id: ${inverter_id}_grid_voltage 
+    register_type: holding
+    address: 0x756A
+    state_class: measurement
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    device_class: voltage
+    filters:
+        - multiply: 0.1    
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Grid Current" 
+    id: ${inverter_id}_grid_current 
+    register_type: holding
+    address: 0x756B
+    state_class: measurement
+    unit_of_measurement: "A"
+    accuracy_decimals: 1
+    device_class: current
+    filters:
+        - multiply: 0.1 
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Grid Frequency" 
+    id: ${inverter_id}_grid_freq 
+    register_type: holding
+    address: 0x756C
+    state_class: measurement
+    unit_of_measurement: "Hz"
+    accuracy_decimals: 2
+    device_class: frequency
+    filters:
+        - multiply: 0.01
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Grid Aparent Power" 
+    id: ${inverter_id}_grid_aparent_power 
+    register_type: holding
+    address: 0x7571
+    value_type: S_WORD
+    state_class: measurement
+    unit_of_measurement: "VA"
+    device_class: apparent_power
+    register_count: 3
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Grid Power" 
+    id: ${inverter_id}_grid_active_power 
+    register_type: holding
+    address: 0x7574
+    state_class: measurement
+    unit_of_measurement: "W"
+    device_class: power  
+    register_count: 3
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Bus Voltage" 
+    id: ${inverter_id}_bus_voltage 
+    register_type: holding
+    address: 0x7577
+    state_class: measurement
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    device_class: voltage
+    register_count: 2
+    filters:
+        - multiply: 0.1 
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "DC-DC Radiator temperature"
+    id: ${inverter_id}_dc_dc_temperature
+    register_type: holding
+    address: 0x7579
+    state_class: measurement
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    filters:
+        - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "DC-AC Radiator temperature"
+    id: ${inverter_id}_dc_ac_temperature
+    register_type: holding
+    address: 0x757A
+    state_class: measurement
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    filters:
+        - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Inverter Transformer Temperature"
+    id: ${inverter_id}_transformer_temperature
+    register_type: holding
+    address: 0x757B
+    state_class: measurement
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    register_count: 3
+    filters:
+        - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Inverter Fan Duty Cycle"
+    id: ${inverter_id}_fan_duty_cycle
+    register_type: holding
+    address: 0x757E
+    state_class: measurement
+    unit_of_measurement: "Rpm"
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Load Phase A Active Power"
+    id: ${inverter_id}_load_phase_a_active_power 
+    register_type: holding
+    value_type: S_WORD
+    address: 0x7584
+    state_class: measurement
+    unit_of_measurement: "W"
+    device_class: power  
+    filters:
+        - multiply: -1
+
+# ################################### Time #######################################
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    id: ${inverter_id}_year 
+    register_type: holding
+    address: 0xA03A
+    bitmask: 0xFF00
+    filters:
+        - offset: 2000
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    id: ${inverter_id}_month 
+    register_type: holding
+    address: 0xA03A
+    bitmask: 0x00FF
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id} 
+    id: ${inverter_id}_day 
+    register_type: holding
+    address: 0xA03B
+    bitmask: 0xFF00
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    id: ${inverter_id}_hour 
+    register_type: holding
+    address: 0xA03B
+    bitmask: 0x00FF
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    id: ${inverter_id}_minute 
+    register_type: holding
+    address: 0xA03C
+    bitmask: 0xFF00
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    id: ${inverter_id}_second 
+    register_type: holding
+    address: 0xA03C
+    bitmask: 0x00FF
+ 
+# ################################ Statistics ####################################
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Battery Charge Today" 
+    id: ${inverter_id}_battery_charge_today 
+    register_type: holding
+    address: 0xCB4D
+    state_class: total_increasing
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    filters:
+        - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Battery Discharge Today" 
+    id: ${inverter_id}_battery_discharge_today 
+    register_type: holding
+    address: 0xCB4E
+    state_class: total_increasing
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    filters:
+        - multiply: 0.1  
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "PV Generation today" 
+    id: ${inverter_id}_pv_generation_today 
+    register_type: holding
+    address: 0xCB4F
+    state_class: total_increasing
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    filters:
+        - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Load Consumption today" 
+    id: ${inverter_id}_load_consumption_today 
+    register_type: holding
+    address: 0xCB50
+    state_class: total_increasing
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    register_count: 2
+    filters:
+        - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Total Battery Charge" 
+    id: ${inverter_id}_battery_charge_total 
+    register_type: holding
+    value_type: U_DWORD_R
+    address: 0xCB52
+    state_class: total_increasing
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    skip_updates: 6
+    filters:
+        - multiply: 0.1 
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Total Battery Discharge" 
+    id: ${inverter_id}_battery_discharge_total 
+    register_type: holding
+    value_type: U_DWORD_R
+    address: 0xCB54
+    state_class: total_increasing
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    filters:
+        - multiply: 0.1   
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Total Solar generation" 
+    id: ${inverter_id}_total_solar_generation 
+    register_type: holding
+    value_type: U_DWORD_R
+    address: 0xCB56
+    state_class: total_increasing
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    filters:
+        - multiply: 0.1 
+        - offset: 9497.4
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Total power consumption" 
+    id: ${inverter_id}_total_power_consumption 
+    register_type: holding
+    value_type: U_DWORD_R
+    address: 0xCB58
+    state_class: total_increasing
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    filters:
+        - multiply: 0.1
+        - offset: 11685.9
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Charging from grid Today" 
+    id: ${inverter_id}_battery_charge_from_grid_today 
+    register_type: holding
+    address: 0xCB5A
+    state_class: total_increasing
+    icon: mdi:counter
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    filters:
+        - multiply: 0.1  
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Grid Consumption Today" 
+    id: ${inverter_id}_grid_consumption_today 
+    register_type: holding
+    address: 0xCB5B
+    state_class: total_increasing
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    filters:
+        - multiply: 0.1 
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Inverter working duration today" 
+    id: ${inverter_id}_inverting_duration_today 
+    register_type: holding
+    address: 0xCB5C
+    unit_of_measurement: "h"
+    device_class: duration
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Inverter bypass duration today" 
+    id: ${inverter_id}_bypass_duration_today 
+    register_type: holding
+    address: 0xCB5D
+    unit_of_measurement: "h"
+    device_class: duration
+    register_count: 4
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Total charging from Grid" 
+    id: ${inverter_id}_total_charging_from_grid 
+    register_type: holding
+    value_type: U_DWORD_R
+    address: 0xCB61
+    state_class: total_increasing
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    filters:
+        - multiply: 0.1  
+        - offset: 121.1
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Total Consumption from Grid" 
+    id: ${inverter_id}_total_consumption_from_grid 
+    register_type: holding
+    value_type: U_DWORD_R
+    address: 0xCB63
+    state_class: total_increasing
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    device_class: energy
+    filters:
+        - multiply: 0.1  
+        - offset: 3732.7
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Total hours of Power Generation" 
+    id: ${inverter_id}_total_hours_of_power_generation 
+    register_type: holding
+    address: 0xCB65
+    state_class: measurement
+    unit_of_measurement: "h"
+    device_class: duration  
+    filters:
+        - offset: 17370
+
+  - platform: modbus_controller
+    modbus_controller_id: ${inverter_id}
+    name: "Total hours of bypass" 
+    id: ${inverter_id}_total_hours_of_bypasss 
+    register_type: holding
+    address: 0xCB66
+    state_class: measurement
+    unit_of_measurement: "h"
+    device_class: duration   
+    filters:
+        - offset: 9036
+
+  - platform: wifi_signal
+    name: "WiFi Signal dB"
+    id: wifi_signal_db
+    update_interval: ${inverter_slow_updates}
+    entity_category: "diagnostic"
+
+# ################################ Templates ##################################
+
+  - platform: template
+    name: "Battery Power"
+    id: ${inverter_id}_battery_power
+    state_class: measurement 
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+    device_class: power
+    update_interval: ${inverter_updates}
+    lambda: |-
+      return id(${inverter_id}_battery_current).state * id(${inverter_id}_battery_voltage).state;
+
+  - platform: template
+    name: "Load Power Factor"
+    id: ${inverter_id}_load_power_factor
+    state_class: measurement
+    accuracy_decimals: 2
+    device_class: power_factor
+    update_interval: ${inverter_updates}
+    lambda: |-
+      float x = 1.0;
+      if (id(${inverter_id}_output_aparent_Power).state > 0) 
+      {
+        x = id(${inverter_id}_output_active_power).state / id(${inverter_id}_output_aparent_Power).state;
+      }
+      return x;
+
+  - platform: uptime
+    id: uptime_internal
+
+  - platform: debug
+    loop_time:
+        name: "Loop Time"
+    min_free:
+      name: Min Free
+    psram:
+      name: PSRAM free
+    free:
+      name: Free
+
+binary_sensor:
+  - platform: template
+    name: "Grid Connected"
+    icon: mdi:transmission-tower
+    id: ${inverter_id}_grid_connected_status
